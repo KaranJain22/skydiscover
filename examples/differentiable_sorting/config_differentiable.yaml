@@ -1,0 +1,28 @@
+# SkyDiscover config for hybrid differentiable search
+# LLM proposes structure, gradient descent optimizes parameters
+
+max_iterations: 50
+language: python
+
+llm:
+  models:
+    - name: gpt-4o
+      provider: openai
+
+search:
+  type: differentiable
+  num_context_programs: 3
+  database:
+    learning_rate: 0.01
+    optimization_steps: 50
+    beta_start: 1.0
+    beta_end: 50.0
+    beta_anneal_steps: 30
+    structure_proposal_ratio: 0.3
+    proxy_loss_file: proxy_loss.py
+
+evaluator:
+  timeout: 30
+
+context_builder:
+  template: differentiable
