@@ -1,0 +1,19 @@
+## Current Best Score: {combined_score}
+
+{metrics_section}
+
+## Current Best Solution
+```python
+{current_solution}
+```
+
+{context_programs_section}
+
+{feedback_section}
+
+## Task
+Propose a new or improved algorithm structure using the differentiable primitives.
+Focus on the algorithmic structure - continuous parameters will be optimized
+automatically via gradient descent.
+
+Output a Python code block constructing a PrimitiveGraph using the available primitives.

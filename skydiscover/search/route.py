@@ -30,6 +30,14 @@ from skydiscover.search.registry import (
 )
 from skydiscover.search.topk.database import TopKDatabase
 
+# Differentiable / gradient-based search
+from skydiscover.search.differentiable.controller import DifferentiableController
+from skydiscover.search.differentiable.database import DifferentiableDatabase
+from skydiscover.search.gradient_pure.controller import GradientPureController
+from skydiscover.search.gradient_pure.database import GradientPureDatabase
+from skydiscover.search.gradient_enhanced.controller import GradientEnhancedController
+from skydiscover.search.gradient_enhanced.database import GradientEnhancedDatabase
+
 logger = logging.getLogger(__name__)
 
 
@@ -69,3 +77,15 @@ register_database("evox_meta", SearchStrategyDatabase)
 # GEPA Native: guided evolution with acceptance gating and merge
 register_database("gepa_native", GEPANativeDatabase)
 register_controller("gepa_native", GEPANativeController)
+
+# Differentiable: hybrid LLM structure + gradient parameter optimization
+register_database("differentiable", DifferentiableDatabase)
+register_controller("differentiable", DifferentiableController)
+
+# Gradient Pure: fully gradient-based, no LLM in inner loop
+register_database("gradient_pure", GradientPureDatabase)
+register_controller("gradient_pure", GradientPureController)
+
+# Gradient Enhanced: standard evolution + gradient-based local refinement
+register_database("gradient_enhanced", GradientEnhancedDatabase)
+register_controller("gradient_enhanced", GradientEnhancedController)

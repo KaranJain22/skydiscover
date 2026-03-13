@@ -483,6 +483,77 @@ class GEPANativeDatabaseConfig(DatabaseConfig):
     random_seed: Optional[int] = 42
 
 
+@dataclass
+class DifferentiableDatabaseConfig(DatabaseConfig):
+    """Configuration for differentiable (hybrid) search.
+
+    LLM proposes algorithm structures as compositions of differentiable
+    primitives; gradient descent optimizes continuous parameters.
+    """
+
+    # Gradient optimization
+    learning_rate: float = 0.01
+    optimization_steps: int = 50
+    beta_start: float = 1.0
+    beta_end: float = 50.0
+    beta_anneal_steps: int = 30
+
+    # Structure vs parameter search ratio
+    structure_proposal_ratio: float = 0.3  # 30% new structures, 70% reoptimize
+
+    # Proxy loss (user-provided differentiable loss function)
+    proxy_loss_file: Optional[str] = None
+
+    # Primitive library
+    available_primitives: List[str] = field(default_factory=lambda: [
+        "SoftIf", "SoftWhile", "SoftFor", "SoftGT", "SoftLT", "SoftEq",
+        "SoftMin", "SoftMax", "SoftSwap", "SoftSelect", "LetAssign",
+    ])
+    max_graph_depth: int = 10
+    max_graph_width: int = 5
+
+
+@dataclass
+class GradientPureDatabaseConfig(DatabaseConfig):
+    """Configuration for pure gradient-based search (no LLM in inner loop)."""
+
+    # Gradient optimization
+    learning_rate: float = 0.01
+    optimization_steps: int = 50
+    beta_start: float = 1.0
+    beta_end: float = 50.0
+    beta_anneal_steps: int = 30
+
+    # Population
+    population_size: int = 10
+    perturbation_std: float = 0.5
+    perturbation_ratio: float = 0.3
+
+    # Proxy loss
+    proxy_loss_file: Optional[str] = None
+
+
+@dataclass
+class GradientEnhancedDatabaseConfig(DatabaseConfig):
+    """Configuration for gradient-enhanced evolution.
+
+    Standard LLM evolution + gradient-based local refinement.
+    """
+
+    # Gradient refinement (fewer steps than pure gradient)
+    learning_rate: float = 0.01
+    refinement_steps: int = 20
+    beta_start: float = 5.0
+    beta_end: float = 50.0
+    beta_anneal_steps: int = 15
+
+    # Whether to enable gradient refinement
+    enable_gradient_refinement: bool = True
+
+    # Proxy loss
+    proxy_loss_file: Optional[str] = None
+
+
 _DB_CONFIG_BY_TYPE: Dict[str, type] = {
     "evox": EvoxDatabaseConfig,
     "beam_search": BeamSearchDatabaseConfig,
@@ -491,6 +562,9 @@ _DB_CONFIG_BY_TYPE: Dict[str, type] = {
     "adaevolve": AdaEvolveDatabaseConfig,
     "openevolve_native": OpenEvolveNativeDatabaseConfig,
     "gepa_native": GEPANativeDatabaseConfig,
+    "differentiable": DifferentiableDatabaseConfig,
+    "gradient_pure": GradientPureDatabaseConfig,
+    "gradient_enhanced": GradientEnhancedDatabaseConfig,
 }
 
 

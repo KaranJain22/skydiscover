@@ -1,0 +1,20 @@
+# SkyDiscover config for pure gradient-based search
+# No LLM in inner loop - fully gradient-based
+
+max_iterations: 100
+language: python
+
+search:
+  type: gradient_pure
+  database:
+    learning_rate: 0.01
+    optimization_steps: 50
+    beta_start: 1.0
+    beta_end: 50.0
+    beta_anneal_steps: 30
+    perturbation_std: 0.5
+    perturbation_ratio: 0.3
+    proxy_loss_file: proxy_loss.py
+
+evaluator:
+  timeout: 30
