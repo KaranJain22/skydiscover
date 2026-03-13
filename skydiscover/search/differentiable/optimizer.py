@@ -89,14 +89,17 @@ class PrimitiveOptimizer:
             total_loss = torch.tensor(0.0)
             num_batches = 0
 
-            for input_dict in training_inputs:
+            for input_data in training_inputs:
                 # Create program state from inputs
-                state = ProgramState(batch_size=batch_size)
-                for key, value in input_dict.items():
-                    if isinstance(value, torch.Tensor):
-                        state[key] = value
-                    else:
-                        state[key] = torch.tensor(value, dtype=torch.float32)
+                if isinstance(input_data, ProgramState):
+                    state = input_data.clone()
+                else:
+                    state = ProgramState(batch_size=batch_size)
+                    for key, value in input_data.items():
+                        if isinstance(value, torch.Tensor):
+                            state[key] = value
+                        else:
+                            state[key] = torch.tensor(value, dtype=torch.float32)
 
                 # Forward pass
                 output_state = graph(state)

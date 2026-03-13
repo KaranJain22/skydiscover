@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import random
 import time
 import uuid
@@ -33,8 +34,14 @@ from skydiscover.search.differentiable.optimizer import (
     OptimizationConfig,
     PrimitiveOptimizer,
 )
-from skydiscover.search.differentiable.primitives.base import SoftPrimitive
-from skydiscover.search.differentiable.primitives.composition import WeightedChoice
+from skydiscover.search.differentiable.primitives.base import ProgramState, SoftPrimitive
+from skydiscover.search.differentiable.primitives.composition import (
+    PrimitiveGraph,
+    Sequence,
+    WeightedChoice,
+)
+from skydiscover.search.differentiable.primitives.conditions import SoftGT
+from skydiscover.search.differentiable.primitives.functions import SoftSwap
 from skydiscover.search.differentiable.program_repr import DifferentiableProgram
 from skydiscover.search.gradient_pure.database import GradientPureDatabase
 from skydiscover.utils.metrics import get_score
@@ -51,7 +58,32 @@ class GradientPureController(DiscoveryController):
     """
 
     def __init__(self, controller_input: DiscoveryControllerInput):
-        super().__init__(controller_input)
+        # Skip LLM initialization from parent - pure gradient doesn't need LLMs.
+        # We manually set up only what we need from DiscoveryController.
+        import multiprocessing as mp
+
+        from skydiscover.evaluation.evaluator import Evaluator
+
+        self.config = controller_input.config
+        self.evaluation_file = controller_input.evaluation_file
+        self.database = controller_input.database
+        self.file_suffix = controller_input.file_suffix
+        self.output_dir = controller_input.output_dir
+        self.shutdown_event = mp.Event()
+        self.early_stopping_triggered = False
+        self.monitor_callback = None
+        self.feedback_reader = None
+        self.num_context_programs = controller_input.config.search.num_context_programs
+
+        # Set up evaluator (no LLM judge for pure gradient)
+        self.config.evaluator.evaluation_file = self.evaluation_file
+        self.config.evaluator.file_suffix = self.file_suffix
+        self.config.evaluator.is_image_mode = self.config.language == "image"
+        self.evaluator = Evaluator(
+            self.config.evaluator,
+            llm_judge=None,
+            max_concurrent=max(self.config.max_parallel_iterations, 4),
+        )
 
         db_config = self.config.search.database
 
@@ -68,11 +100,12 @@ class GradientPureController(DiscoveryController):
         self.perturbation_std = getattr(db_config, "perturbation_std", 0.5)
         self.perturbation_ratio = getattr(db_config, "perturbation_ratio", 0.3)
 
-        # Proxy loss
+        # Proxy loss and input generation
         self.proxy_loss_fn = None
+        self._generate_inputs_fn = None
         proxy_loss_file = getattr(db_config, "proxy_loss_file", None)
         if proxy_loss_file:
-            self.proxy_loss_fn = self._load_proxy_loss(proxy_loss_file)
+            self._load_proxy_loss_module(proxy_loss_file)
 
         self.training_inputs = []
 
@@ -82,19 +115,108 @@ class GradientPureController(DiscoveryController):
             f"steps={self.opt_config.optimization_steps})"
         )
 
-    def _load_proxy_loss(self, path):
-        """Load proxy loss function from file."""
+    def _load_proxy_loss_module(self, path):
+        """Load proxy loss function and optional generate_inputs from file."""
         import importlib.util
+
+        # Resolve path relative to evaluation file directory if not absolute
+        if not os.path.isabs(path) and not os.path.exists(path):
+            eval_dir = os.path.dirname(os.path.abspath(self.evaluation_file))
+            candidate = os.path.join(eval_dir, path)
+            if os.path.exists(candidate):
+                path = candidate
 
         try:
             spec = importlib.util.spec_from_file_location("proxy_loss", path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             if hasattr(module, "proxy_loss"):
-                return module.proxy_loss
+                self.proxy_loss_fn = module.proxy_loss
+                logger.info(f"Loaded proxy loss from {path}")
+            if hasattr(module, "generate_inputs"):
+                self._generate_inputs_fn = module.generate_inputs
+                logger.info(f"Loaded generate_inputs from {path}")
         except Exception as e:
-            logger.warning(f"Failed to load proxy loss: {e}")
-        return None
+            logger.warning(f"Failed to load proxy loss module: {e}")
+
+    def _seed_initial_graphs(self) -> None:
+        """Seed the graph population with simple compare-and-swap networks.
+
+        Creates starter PrimitiveGraphs so pure gradient search can begin
+        without requiring an LLM to bootstrap.
+        """
+        db: GradientPureDatabase = self.database
+        beta = self.opt_config.beta_start
+
+        # Graph 1: 2-element compare-and-swap
+        cond_01 = SoftGT("e0", "e1", beta=beta)
+        swap_01 = SoftSwap("e0", "e1", cond_01, beta=beta)
+        graph_2 = PrimitiveGraph(
+            inputs=["e0", "e1"],
+            outputs=["e0", "e1"],
+            operations=[swap_01],
+            beta=beta,
+        )
+        db.register_graph(str(uuid.uuid4()), graph_2, 0.0)
+
+        # Graph 2: 3-element bubble sort (compare-swap 01, 12, 01)
+        g3_cond_01 = SoftGT("e0", "e1", beta=beta)
+        g3_swap_01 = SoftSwap("e0", "e1", g3_cond_01, beta=beta)
+        g3_cond_12 = SoftGT("e1", "e2", beta=beta)
+        g3_swap_12 = SoftSwap("e1", "e2", g3_cond_12, beta=beta)
+        g3_cond_01b = SoftGT("e0", "e1", beta=beta)
+        g3_swap_01b = SoftSwap("e0", "e1", g3_cond_01b, beta=beta)
+        graph_3 = PrimitiveGraph(
+            inputs=["e0", "e1", "e2"],
+            outputs=["e0", "e1", "e2"],
+            operations=[g3_swap_01, g3_swap_12, g3_swap_01b],
+            beta=beta,
+        )
+        db.register_graph(str(uuid.uuid4()), graph_3, 0.0)
+
+        # Graph 3: 3-element with WeightedChoice over two swap orderings
+        # Option A: swap(0,1) then swap(1,2)
+        opt_a_c01 = SoftGT("e0", "e1", beta=beta)
+        opt_a_s01 = SoftSwap("e0", "e1", opt_a_c01, beta=beta)
+        opt_a_c12 = SoftGT("e1", "e2", beta=beta)
+        opt_a_s12 = SoftSwap("e1", "e2", opt_a_c12, beta=beta)
+        option_a = Sequence([opt_a_s01, opt_a_s12], beta=beta)
+
+        # Option B: swap(1,2) then swap(0,1)
+        opt_b_c12 = SoftGT("e1", "e2", beta=beta)
+        opt_b_s12 = SoftSwap("e1", "e2", opt_b_c12, beta=beta)
+        opt_b_c01 = SoftGT("e0", "e1", beta=beta)
+        opt_b_s01 = SoftSwap("e0", "e1", opt_b_c01, beta=beta)
+        option_b = Sequence([opt_b_s12, opt_b_s01], beta=beta)
+
+        choice = WeightedChoice([option_a, option_b], beta=beta)
+        # Add a final pass to ensure sorted
+        final_c01 = SoftGT("e0", "e1", beta=beta)
+        final_s01 = SoftSwap("e0", "e1", final_c01, beta=beta)
+        graph_choice = PrimitiveGraph(
+            inputs=["e0", "e1", "e2"],
+            outputs=["e0", "e1", "e2"],
+            operations=[choice, final_s01],
+            beta=beta,
+        )
+        db.register_graph(str(uuid.uuid4()), graph_choice, 0.0)
+
+        logger.info(f"Seeded {len(db.graph_population)} initial graphs")
+
+    def _populate_training_inputs(self) -> None:
+        """Generate training inputs for gradient optimization."""
+        if self._generate_inputs_fn:
+            self.training_inputs = [self._generate_inputs_fn() for _ in range(4)]
+            logger.info(f"Generated {len(self.training_inputs)} training input batches")
+        else:
+            # Default: random arrays for element-wise variables
+            for _ in range(4):
+                state = ProgramState(batch_size=8)
+                n = random.choice([3, 4, 5])
+                for i in range(n):
+                    state[f"e{i}"] = torch.randn(8)
+                self.training_inputs.append(state)
+            logger.info(f"Generated {len(self.training_inputs)} default training input batches")
 
     async def run_discovery(
         self,
@@ -106,6 +228,13 @@ class GradientPureController(DiscoveryController):
         total = start_iteration + max_iterations
         logger.info(f"Gradient pure search: running {max_iterations} iterations")
 
+        # Bootstrap: seed graphs and training inputs if needed
+        if isinstance(self.database, GradientPureDatabase):
+            if not self.database.graph_population:
+                self._seed_initial_graphs()
+            if not self.training_inputs and self.proxy_loss_fn:
+                self._populate_training_inputs()
+
         for iteration in range(start_iteration, total):
             if self.shutdown_event.is_set():
                 break
@@ -114,15 +243,13 @@ class GradientPureController(DiscoveryController):
                 iter_start = time.time()
 
                 if not isinstance(self.database, GradientPureDatabase):
-                    # Fallback to LLM iteration
-                    await self._run_llm_fallback(iteration)
+                    logger.warning("Database is not GradientPureDatabase, skipping iteration")
                     continue
 
                 db: GradientPureDatabase = self.database
 
                 if not db.graph_population:
-                    # No graphs yet - use LLM to bootstrap
-                    await self._run_llm_fallback(iteration)
+                    logger.warning("No graphs in population, skipping iteration")
                     continue
 
                 # Decide: exploit existing or perturb
@@ -134,7 +261,7 @@ class GradientPureController(DiscoveryController):
                     result = db.get_random_graph()
 
                 if result is None:
-                    await self._run_llm_fallback(iteration)
+                    logger.warning("Failed to sample graph, skipping iteration")
                     continue
 
                 graph_id, graph = result
